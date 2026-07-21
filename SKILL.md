@@ -17,16 +17,25 @@ allowed-tools:
 - 用户想**看自己的 agent 跑得怎样**：盈亏、持仓、决策状态、列表
 - 用户想**删掉**一个建错的 agent
 
-## ⚠️ 前置：JWT（必须，且只在用户自己的 shell 里设置）
+## ⚠️ 前置：JWT（必须）
 
 - 用户登录网站后，从浏览器 localStorage / cookie 拿到登录 JWT（Privy）。
-- **绝不让用户把 JWT 贴进对话**——会进对话记录。让用户**自己在终端** export：
+- **绝不让用户把 JWT 贴进对话**——会进对话记录。两种交给脚本的方式，**优先用 login**：
+
+  **方式一（推荐，一次搞定）** —— 让用户在**自己的终端**跑一次：
+  ```bash
+  python3 "$S" login
   ```
-  export FLOWMAX_JWT="<把 token 粘这里>"
+  脚本用 getpass 不回显地读 JWT，存到 `~/.flowmax/jwt`（Windows 用 DPAPI 加密、Unix 600 权限），存完自动探一次确认有效。**之后不管 Codex/Claude 怎么启动都自动读到，再也不用碰环境变量。** 不想用了 `python3 "$S" logout`。这是专门为 Windows 准备的——Codex 桌面进程继承不到别的 PowerShell 里设的 `$env:` 变量，环境变量方式在那边会反复失败。
+
+  **方式二（环境变量）** —— 仅当用户不想存文件。**必须在启动 Codex/Claude 的同一个终端**里设：
+  ```bash
+  export FLOWMAX_JWT="<把 token 粘这里>"     # macOS/Linux
+  # PowerShell: $env:FLOWMAX_JWT="<token>"
   ```
-  如果在 Claude Code 里，让用户用 `! export ...` 或在自己的 shell 里设好再启动。
-- JWT **只放 `eyJ...` 本体，不要带 `Bearer ` 前缀**——脚本会自动加，重复了会 401 INVALID_TOKEN。
-- 环境变量没设时，脚本会直接报错退出，提示设置方法。**别替用户猜/存 token**。
+
+- JWT **只放 `eyJ...` 本体，不要带 `Bearer ` 前缀**——脚本会自动加，重复会 401（`login` 会自动剥掉误带的 Bearer）。
+- **先看每条命令开头横幅** `JWT=stored:.../env (...)/(none — run: flowmax.py login)`，确认 JWT 被识别再往下走；没识别就先 `login`。**别替用户猜/存 token**。
 - 环境：默认连 **PROD**（`market.prod.gcp.hubble-rpc.xyz`）。用户要操作**测试**环境，让他再设 `export FLOWMAX_BASE="https://market.dev.gcp.hubble-rpc.xyz"`（注意 prod / staging 启用的 LLM 可能不同，脚本每次探测，不写死）。
 
 ## 写操作必须先确认
@@ -53,7 +62,7 @@ S="${CLAUDE_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/flowmax-skill}/scripts
 
 依次问（可用 AskUserQuestion 一次性问）：
 
-0. **环境 + JWT 就绪？** 默认连 **PROD**。先确认用户已在**自己终端** export 了 `FLOWMAX_JWT`（绝不让用户贴进对话；JWT 不要带 `Bearer`，脚本自动加）。要操作 staging 才让用户再设 `FLOWMAX_BASE=https://market.dev.gcp.hubble-rpc.xyz`。JWT 没设好就停在这步，别往下走。
+0. **环境 + JWT 就绪？** 默认连 **PROD**。先确认 JWT 已就绪——**优先问用户跑过 `python3 "$S" login` 没有**（一次存好，永久可用）；没跑过就让他先跑。也可走环境变量（必须在启动客户端的同一终端）。绝不让用户贴进对话；JWT 不要带 `Bearer`（login 会自动剥）。要操作 staging 才让用户再设 `FLOWMAX_BASE=https://market.dev.gcp.hubble-rpc.xyz`。**看命令横幅 `JWT=...` 确认识别成功**再往下走。
 1. **交易标的**：哪个币？如 `BTCUSDT`（大写、不带横杠）。⚠️ `MATICUSDT` 已下架，用 `POLUSDT`。
 2. **策略目标 goal**：`steady` 稳健保值 / `swing` 波段 / `trend` 趋势 / `arbitrage` 套利。
 3. **风险档位 style**：`conservative` 保守(1x) / `balanced` 平衡(≤3x) / `aggressive` 激进(≤5x)。
@@ -208,12 +217,14 @@ python3 "$S" logs positions --agent <id>
 ## 脚本速查（`scripts/flowmax.py`，stdlib only，`python3` 直跑）
 
 ```bash
-export FLOWMAX_JWT="<你的 JWT>"          # 必须，只在自己 shell 里设（不要带 Bearer）
+# JWT：优先跑一次 `login` 存本地（见下），不必每次 export。环境变量方式：在同一终端 export FLOWMAX_JWT="<JWT>"（不要带 Bearer）。
 # 默认连 PROD；要切 staging 才设下面这条：
 # export FLOWMAX_BASE="https://market.dev.gcp.hubble-rpc.xyz"
 
 S="${CLAUDE_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/flowmax-skill}/scripts/flowmax.py"
-python3 $S probe                                 # 探测合法值 + mock id + 内嵌模板
+python3 $S login                                 # 一次性把 JWT 存本地（getpass 不回显），之后永久可用
+python3 $S logout                                # 清除本地 JWT
+python3 $S probe                                 # 探测合法值 + mock id + 内嵌模板（横幅显示 JWT 来源）
 python3 $S research create --name .. --prompt .. # 建 research（单个 flags 或 --spec 批量）
 python3 $S research get    --agent <id>          # 详情（看 reconcile 挑了哪些数据源）
 python3 $S research job    --job <job_id>        # 部署进度

@@ -14,11 +14,14 @@ Scope (what the user needs):
     and a mistaken one can be removed.
 
 Security:
-  - JWT read from env FLOWMAX_JWT (fallback HUBBLE_JWT / JWT). NEVER hardcoded or
-    printed (only a masked prefix). Users set it in their own shell — never paste
-    it into chat.
-  - BASE from env FLOWMAX_BASE (fallback HUBBLE_BASE), default staging
-    https://market.dev.gcp.hubble-rpc.xyz . prod = https://market.prod.gcp.hubble-rpc.xyz .
+  - JWT read from env FLOWMAX_JWT (fallback HUBBLE_JWT / JWT) OR the local login
+    file written by `flowmax.py login` (~/.flowmax/jwt; DPAPI-encrypted on Windows,
+    mode 0600 on Unix). The login file exists because env-var inheritance is
+    unreliable on Windows (Codex launched elsewhere never sees a per-shell var).
+    NEVER hardcoded or printed (only a masked prefix). NEVER paste into chat —
+    set the env var in your own shell or run `login` once.
+  - BASE from env FLOWMAX_BASE (fallback HUBBLE_BASE), default PROD
+    https://market.prod.gcp.hubble-rpc.xyz . staging = https://market.dev.gcp.hubble-rpc.xyz .
 
 Stdlib only — runs with plain `python3` (no uv/deps). Canonical PM templates
 (goal prompt segments / risk tiers / interval map / exit policies) are frozen in
@@ -27,6 +30,7 @@ this file so the skill is independent of any repo.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sys
@@ -170,15 +174,113 @@ def env_short(name: str) -> str:
 
 
 def get_jwt() -> str:
-    t = os.environ.get("FLOWMAX_JWT") or os.environ.get("HUBBLE_JWT") or os.environ.get("JWT")
+    t = (os.environ.get("FLOWMAX_JWT") or os.environ.get("HUBBLE_JWT")
+         or os.environ.get("JWT"))
+    if not t:
+        t = read_stored_jwt()
     if not t:
         sys.stderr.write(
-            "ERROR: set FLOWMAX_JWT env var to your login JWT first (from the website after "
-            "login — localStorage / cookie). Never paste it into chat; export it in your own "
-            "shell, e.g.  export FLOWMAX_JWT=\"<token>\"\n"
+            "ERROR: no JWT found.\n"
+            "  Recommended — run this ONCE in your own terminal (then it works everywhere,\n"
+            "  no matter how Codex/Claude was launched):\n"
+            "    python3 flowmax.py login\n"
+            "  Or set the env var in the SAME terminal you launch Codex/Claude from:\n"
+            "    export FLOWMAX_JWT=\"<token>\"   (macOS/Linux)\n"
+            "    $env:FLOWMAX_JWT=\"<token>\"       (PowerShell)\n"
+            "  (Never paste the JWT into chat.)\n"
         )
         sys.exit(2)
     return t
+
+
+# credential storage — JWT works regardless of which process launched Codex/Claude,
+# because env-var inheritance is unreliable on Windows (per-shell vars don't reach a
+# Codex desktop process launched elsewhere). Read order: env -> local login file.
+CRED_DIR = Path.home() / ".flowmax"
+CRED_FILE = CRED_DIR / "jwt"
+_DPAPI_PREFIX = b"DPAPI1:"
+
+
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _dpapi_protect(data: bytes) -> bytes:
+    """Encrypt with Windows DPAPI (current-user scope). ctypes only — no deps."""
+    import ctypes
+    from ctypes import wintypes
+    crypt32 = ctypes.windll.crypt32  # type: ignore[attr-defined]
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    buf = ctypes.create_string_buffer(data, len(data))
+    blob_in = wintypes.DATA_BLOB(len(data), ctypes.cast(buf, wintypes.LPBYTE))
+    blob_out = wintypes.DATA_BLOB()
+    if not crypt32.CryptProtectData(ctypes.byref(blob_in), None, None, None, None,
+                                    0, ctypes.byref(blob_out)):
+        raise OSError("CryptProtectData failed")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        kernel32.LocalFree(blob_out.pbData)
+
+
+def _dpapi_unprotect(data: bytes) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+    crypt32 = ctypes.windll.crypt32  # type: ignore[attr-defined]
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    buf = ctypes.create_string_buffer(data, len(data))
+    blob_in = wintypes.DATA_BLOB(len(data), ctypes.cast(buf, wintypes.LPBYTE))
+    blob_out = wintypes.DATA_BLOB()
+    if not crypt32.CryptUnprotectData(ctypes.byref(blob_in), None, None, None, None,
+                                      0, ctypes.byref(blob_out)):
+        raise OSError("CryptUnprotectData failed")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        kernel32.LocalFree(blob_out.pbData)
+
+
+def store_jwt(token: str) -> Path:
+    """Persist JWT locally. Windows: DPAPI-encrypted. Unix: plaintext file, mode 0600."""
+    CRED_DIR.mkdir(parents=True, exist_ok=True)
+    raw = token.strip().encode()
+    payload = _DPAPI_PREFIX + _dpapi_protect(raw) if _is_windows() else raw
+    fd = os.open(str(CRED_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+    if not _is_windows():
+        os.chmod(CRED_FILE, 0o600)
+    return CRED_FILE
+
+
+def read_stored_jwt():
+    """Return stored JWT string, or None if absent / undecryptable."""
+    try:
+        data = CRED_FILE.read_bytes()
+    except FileNotFoundError:
+        return None
+    if data.startswith(_DPAPI_PREFIX):
+        if not _is_windows():
+            return None  # encrypted blob can only be read back on Windows
+        try:
+            return _dpapi_unprotect(data[len(_DPAPI_PREFIX):]).decode()
+        except Exception:
+            return None
+    return data.decode()
+
+
+def jwt_status() -> str:
+    """One-line summary of where the JWT comes from — shown in every run banner."""
+    env = (os.environ.get("FLOWMAX_JWT") or os.environ.get("HUBBLE_JWT")
+           or os.environ.get("JWT"))
+    if env:
+        return f"env ({len(env)} chars)"
+    stored = read_stored_jwt()
+    if stored:
+        return f"stored:{CRED_FILE} ({len(stored)} chars)"
+    return "(none — run: flowmax.py login)"
 
 
 def api(method: str, path: str, body=None, quiet: bool = False, prefix: str = API_PREFIX):
@@ -261,11 +363,57 @@ def pretty(d) -> str:
 
 
 # =========================================================================
+# login / logout — persist JWT locally so it survives across Codex/Claude launches
+# =========================================================================
+def cmd_login(args):
+    print("Flowmax login — paste the JWT you got from the website after logging in.")
+    print("It is stored locally; the prompt does NOT echo. Do NOT include a 'Bearer ' prefix.")
+    print("(Empty input cancels.)\n")
+    try:
+        token = getpass.getpass("JWT: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.")
+        return 1
+    token = token.strip()
+    if not token:
+        print("Cancelled (empty).")
+        return 1
+    if token.lower().startswith("bearer "):
+        token = token[7:]
+        print("  (stripped a stray 'Bearer ' prefix)")
+    if not token.startswith("eyJ"):
+        sys.stderr.write("WARN: JWT does not start with 'eyJ' — storing anyway, double-check it.\n")
+    p = store_jwt(token)
+    print(f"\nJWT stored -> {p}")
+    print("  Windows: encrypted with DPAPI (only your Windows account can read it)"
+          if _is_windows() else "  Unix: file mode 0600 (only you can read it)")
+    print(f"\n[verify] testing against {env_tag()} {base_url()} ...")
+    c, _ = api("GET", "/research/asset-types", quiet=True)
+    if c == 200:
+        print("[verify] OK — JWT accepted (HTTP 200). You're logged in.")
+        return 0
+    sys.stderr.write(
+        f"[verify] stored, but the backend rejected it (HTTP {c}).\n"
+        "        Likely: expired JWT, prod/staging mismatch, or wrong token. Re-run `login`.\n"
+    )
+    return 1
+
+
+def cmd_logout(args):
+    if CRED_FILE.exists():
+        CRED_FILE.unlink()
+        print(f"Removed stored JWT -> {CRED_FILE}")
+    else:
+        print(f"No stored JWT at {CRED_FILE} (nothing to remove).")
+    return 0
+
+
+# =========================================================================
 # probe
 # =========================================================================
 def cmd_probe(args):
     print(f"BASE = {base_url()}")
-    print(f"JWT  = {env_short('FLOWMAX_JWT') or env_short('HUBBLE_JWT') or env_short('JWT')}")
+    print(f"JWT  = {jwt_status()}")
     print("\n[asset_types]")
     c, d = api("GET", "/research/asset-types")
     print(pretty(d) if d else f"HTTP {c}")
@@ -722,6 +870,13 @@ def build_parser():
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    # login / logout
+    pl = sub.add_parser("login", help="登录：把 JWT 存到本地（仅你可读），之后无需再设环境变量")
+    pl.set_defaults(func=cmd_login)
+
+    plo = sub.add_parser("logout", help="清除本地存储的 JWT")
+    plo.set_defaults(func=cmd_logout)
+
     # probe
     pr = sub.add_parser("probe", help="探测合法值 + mock id + 内嵌模板")
     pr.add_argument("--asset-type", default=None, help="展示该 asset_type 的 datasource 清单")
@@ -846,11 +1001,10 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    # Loud env banner on every run — prod is the default, so make sure the user
-    # always sees which environment they're hitting before any real action.
+    # Loud env banner on every run — prod is the default AND JWT source varies
+    # (env vs stored login file), so always show both before any real action.
     sys.stderr.write(
-        f"[flowmax] env={env_tag()}  BASE={base_url()}  "
-        f"JWT={env_short('FLOWMAX_JWT') or env_short('HUBBLE_JWT') or env_short('JWT')}\n"
+        f"[flowmax] env={env_tag()}  BASE={base_url()}  JWT={jwt_status()}\n"
     )
     return args.func(args)
 

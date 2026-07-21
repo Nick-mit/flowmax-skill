@@ -63,13 +63,33 @@ flowmax-skill/
 
 登录 [Hubble 市场](https://market.prod.gcp.hubble-rpc.xyz) 网站后，从浏览器 **localStorage / cookie** 拿到登录 JWT（Privy）。
 
-> ⚠️ **安全**：JWT 等同于你的账号登录态。**只在你自己终端里设置环境变量，绝不要贴进任何对话 / 聊天 / 截图。**
+> ⚠️ **安全**：JWT 等同于你的账号登录态。**只在你自己终端里输入 / 设置，绝不要贴进任何对话 / 聊天 / 截图。**
 
-设置时注意：
+两种方式交给脚本，**优先 `login`**：
 
-- 环境变量**只存 `eyJ...` JWT 本体**。
-- **不要加 `Bearer ` 前缀** —— 脚本会自动加 `Authorization: Bearer <jwt>`，你再加一遍会拼成 `Bearer Bearer eyJ...`，直接 `401 INVALID_TOKEN`。
-- 在**启动 Claude Code / Codex 之前**设置，确保进程能继承该变量。
+#### 方式一：`login` 一次（推荐，最省心）
+
+在**你自己的终端**跑一次（getpass 不回显；存到 `~/.flowmax/jwt`，Windows 用 DPAPI 加密、Unix 600 权限）：
+
+```bash
+python3 scripts/flowmax.py login
+```
+
+存完脚本自动探一次确认 JWT 有效。**之后不管 Claude Code / Codex 怎么启动都自动读到，再也不用设环境变量**——这正是为 Windows 准备的：Codex 桌面进程继承不到别的 PowerShell 里的 `$env:` 变量，环境变量方式在那边会反复失败。不想用了 `python3 scripts/flowmax.py logout`。
+
+#### 方式二：环境变量（不想存文件时）
+
+```bash
+export FLOWMAX_JWT="<JWT 本体>"        # macOS/Linux
+# PowerShell: $env:FLOWMAX_JWT="<JWT 本体>"
+```
+
+> 必须**在启动 Claude Code / Codex 的同一个终端**里设，子进程才能继承。Windows 上若 Codex 已开启 / 从别处启动，就读不到你在另一个 PowerShell 设的变量（这是最常见的失败原因，所以才推荐 `login`）。
+
+#### 通用注意
+
+- 只存 `eyJ...` JWT **本体**，**不要带 `Bearer ` 前缀**（脚本自动加；`login` 会自动剥掉误带的 Bearer）。
+- 每条命令开头打印 `JWT=stored:…/env (…)/(none — run: flowmax.py login)`，**先看这行确认被识别**。
 
 ### 环境（默认 PROD）
 
@@ -86,17 +106,15 @@ flowmax-skill/
 #### macOS / Linux
 
 ```bash
-export FLOWMAX_JWT="<JWT 本体，不要带 Bearer>"
-# 默认就是 prod，可省略 FLOWMAX_BASE；切 staging 才设下面这条：
-# export FLOWMAX_BASE="https://market.dev.gcp.hubble-rpc.xyz"
+# 默认就是 prod，无需设；要切 staging 才设下面这条：
+export FLOWMAX_BASE="https://market.dev.gcp.hubble-rpc.xyz"
 ```
 
 #### Windows PowerShell
 
 ```powershell
-$env:FLOWMAX_JWT = Read-Host "粘贴 JWT 本体，不要带 Bearer"
 # 默认就是 prod；切 staging 才设下面这条：
-# $env:FLOWMAX_BASE = "https://market.dev.gcp.hubble-rpc.xyz"
+$env:FLOWMAX_BASE = "https://market.dev.gcp.hubble-rpc.xyz"
 ```
 
 然后在**同一个终端**启动 Claude Code / Codex，确保它继承到变量。
@@ -116,14 +134,19 @@ $env:FLOWMAX_JWT = Read-Host "粘贴 JWT 本体，不要带 Bearer"
 
 ### 方式 B：直接命令行（三步跑通）
 
+**第 0 步：登录一次（存 JWT，推荐）**
+
+```bash
+python3 scripts/flowmax.py login    # 粘贴 JWT（不回显），存本地，之后永久可用
+```
+
 **第 1 步：认证探测**
 
 ```bash
-export FLOWMAX_JWT="<你的 JWT>"   # 不要带 Bearer
 python3 scripts/flowmax.py probe
 ```
 
-确认：`env=PROD`（或你设的 staging）、JWT 认证成功、找到 mock exchange auth、找到当前环境启用的 LLM。每条命令都会在 stderr 打印 `[flowmax] env=… BASE=… JWT=…`，执行前看一眼环境对不对。
+确认：横幅 `JWT=stored:…`（或 `env (…)`）、`env=PROD`、找到 mock exchange auth、找到当前环境启用的 LLM。每条命令都会在 stderr 打印 `[flowmax] env=… BASE=… JWT=…`，执行前看一眼环境对不对。
 
 **第 2 步：创建一个私有纸面交易 PM**
 
@@ -152,7 +175,14 @@ python3 scripts/flowmax.py pm start --agent <agent_id> --ms 900000
 
 ## 命令参考
 
-> JWT 从 `FLOWMAX_JWT` 读取；base 从 `FLOWMAX_BASE` 读取（**默认 prod**）。所有写操作请先确认。`--public` / `--private` 二选一，**默认私有**。
+> JWT 从 `FLOWMAX_JWT`（env）**或 `~/.flowmax/jwt`（`login` 存的）**读取；base 从 `FLOWMAX_BASE` 读取（**默认 prod**）。所有写操作请先确认。`--public` / `--private` 二选一，**默认私有**。
+
+### 认证
+
+| 命令 | 说明 |
+|------|------|
+| `login` | 一次性把 JWT 存本地（getpass 不回显；Windows DPAPI / Unix 600），之后无需再设环境变量；存完自动自检 |
+| `logout` | 清除本地存储的 JWT |
 
 ### 探测
 
