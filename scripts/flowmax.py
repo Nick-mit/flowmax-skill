@@ -347,9 +347,9 @@ def build_pm_prompt(goal: str, exit_policy=None, overlay=None, extra_prompt=None
     if exit_policy and exit_policy in EXIT_POLICIES:
         parts.append(EXIT_POLICIES[exit_policy])
     if overlay == "multi-trade":
-        sys.stderr.write(
+        print(
             "  WARN: overlay 'multi-trade' causes position piling in production. "
-            "Use 'hard-stop' for real trading PMs.\n"
+            "Use 'hard-stop' for real trading PMs."
         )
     if overlay and overlay in OVERLAYS:
         parts.append(OVERLAYS[overlay])
@@ -562,7 +562,7 @@ def cmd_pm_create(args):
         sys.stderr.write(f"ERROR: --goal required, one of {list(PROMPT_SEGMENTS)}\n")
         return 2
     if (goal, style) in CONFLICT_PAIRS:
-        sys.stderr.write(f"  WARN: ({goal},{style}) is a contradiction pair — proceeds, but behavior may be incoherent.\n")
+        print(f"  WARN: ({goal},{style}) is a contradiction pair — proceeds, but behavior may be incoherent.")
 
     sys_prompt = spec.get("system_prompt") or build_pm_prompt(
         goal,
@@ -1001,11 +1001,12 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    # Loud env banner on every run — prod is the default AND JWT source varies
-    # (env vs stored login file), so always show both before any real action.
-    sys.stderr.write(
-        f"[flowmax] env={env_tag()}  BASE={base_url()}  JWT={jwt_status()}\n"
-    )
+    # Env banner on every run, on STDOUT (not stderr): PowerShell treats a native
+    # command's stderr as its error stream, so a stderr banner makes `& python ...`
+    # invoked from a .ps1 throw a NativeCommandError and abort. stdout avoids that
+    # and still shows env + JWT source before any real action (prod is the default;
+    # JWT may come from env or the stored login file).
+    print(f"[flowmax] env={env_tag()}  BASE={base_url()}  JWT={jwt_status()}")
     return args.func(args)
 
 
