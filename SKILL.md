@@ -25,12 +25,25 @@ allowed-tools:
   export FLOWMAX_JWT="<把 token 粘这里>"
   ```
   如果在 Claude Code 里，让用户用 `! export ...` 或在自己的 shell 里设好再启动。
+- JWT **只放 `eyJ...` 本体，不要带 `Bearer ` 前缀**——脚本会自动加，重复了会 401 INVALID_TOKEN。
 - 环境变量没设时，脚本会直接报错退出，提示设置方法。**别替用户猜/存 token**。
-- 环境：默认连 **staging**（`market.dev.gcp.hubble-rpc.xyz`）。用户要操作**线上正式**环境，让他再设 `export FLOWMAX_BASE="https://market.prod.gcp.hubble-rpc.xyz"`（注意 prod 用的 LLM 可能和 staging 不同，脚本每次探测，不写死）。
+- 环境：默认连 **PROD**（`market.prod.gcp.hubble-rpc.xyz`）。用户要操作**测试**环境，让他再设 `export FLOWMAX_BASE="https://market.dev.gcp.hubble-rpc.xyz"`（注意 prod / staging 启用的 LLM 可能不同，脚本每次探测，不写死）。
 
 ## 写操作必须先确认
 
 创建 / 删除 / 启停 scheduler 是用户账号上的**真实 agent**。执行前把「将做什么 + 关键参数」复述给用户，得到明确「确认」再调脚本。**不要**未经确认就建一堆 agent。
+
+---
+
+## 调用脚本（Claude Code 与 Codex 通用）
+
+下面所有命令用变量 `$S` 指向脚本。它在 **Claude Code**（`$CLAUDE_SKILL_DIR`）和 **Codex**（`$CODEX_HOME`，默认 `~/.codex`）里都能解析，本会话设一次即可：
+
+```bash
+S="${CLAUDE_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/flowmax-skill}/scripts/flowmax.py"
+```
+
+> 脚本纯标准库、无硬编码路径，`python3 "$S" ...` 直跑。每条命令都会在 stderr 打印 `[flowmax] env=PROD/STAGING …`，执行前看一眼环境对不对。
 
 ---
 
@@ -40,25 +53,27 @@ allowed-tools:
 
 依次问（可用 AskUserQuestion 一次性问）：
 
+0. **环境 + JWT 就绪？** 默认连 **PROD**。先确认用户已在**自己终端** export 了 `FLOWMAX_JWT`（绝不让用户贴进对话；JWT 不要带 `Bearer`，脚本自动加）。要操作 staging 才让用户再设 `FLOWMAX_BASE=https://market.dev.gcp.hubble-rpc.xyz`。JWT 没设好就停在这步，别往下走。
 1. **交易标的**：哪个币？如 `BTCUSDT`（大写、不带横杠）。⚠️ `MATICUSDT` 已下架，用 `POLUSDT`。
 2. **策略目标 goal**：`steady` 稳健保值 / `swing` 波段 / `trend` 趋势 / `arbitrage` 套利。
 3. **风险档位 style**：`conservative` 保守(1x) / `balanced` 平衡(≤3x) / `aggressive` 激进(≤5x)。
-4. **公开？** 公开会进 marketplace；默认建议先私有，验证好再公开。
+4. **私有还是公开**：默认**私有**（不传 flag 即私有，不进 marketplace）；验证好了再 `--public`。
 5. （可选）**绑 research**：要不要绑几个已建好的 research agent 喂它？把 id 要过来。
 6. （可选）**真实交易加风控**：真实交易 PM 默认加 `--overlay hard-stop`（硬止损纪律，防堆仓爆仓）。
+7. **复述全部参数 + 环境（PROD/staging），得到明确确认后**再执行（写操作铁律）。
 
 > 名字你帮用户起：`<风格>·<目标> (<币种>)`，如「保守·稳健保值 (BTC)」。
 
 ### 一条命令建好（默认 mock 纸面凭证 + 自动启动）
 
 ```bash
-python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" pm create \
+python3 "$S" pm create \
   --name "保守·稳健保值 (BTC)" \
   --symbol BTCUSDT \
   --goal steady \
   --style conservative \
   --overlay hard-stop \
-  --public false
+  --private
 ```
 
 脚本自动做：探测启用 LLM → 建 mock 纸面交易凭证（**不碰真钱**）→ 从内嵌模板组装 system_prompt + risk_config → POST 创建 → 默认自动启 scheduler。返回 `agent_id` 和 `mock_auth_id`，**记下来**给用户。
@@ -66,12 +81,12 @@ python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" pm create \
 ### 建完立刻验证它在跑
 
 ```bash
-python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" pm status --agent <id>
+python3 "$S" pm status --agent <id>
 ```
 
 看 `isSchedulerRunning=true` 且 `intervalMs=900000`（不是 3600000）。如果不是 running，补启：
 ```bash
-python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" pm start --agent <id> --ms 900000
+python3 "$S" pm start --agent <id> --ms 900000
 ```
 
 ### 默认值（已替非开发用户踩过坑）
@@ -108,12 +123,12 @@ python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" pm start --agent <id> --ms 900000
 ### 创建 + 等部署完成
 
 ```bash
-python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" research create \
+python3 "$S" research create \
   --name "Crypto·资金面 OI动向" \
   --asset-type Crypto \
   --analysis-type "Capital Flow Analysis" \
   --prompt "<上面写的完整 prompt>" \
-  --public false \
+  --private \
   --wait 120        # 等 120s 部署到 deployed
 ```
 
@@ -125,28 +140,28 @@ python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" research create \
 
 ### 列出我的 agent
 ```bash
-python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" pm list --limit 50
+python3 "$S" pm list --limit 50
 ```
 
 ### 看运行状态
 ```bash
-python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" pm status --agent <id>
+python3 "$S" pm status --agent <id>
 ```
 `phase`: idle → initializing → researching → decision → completed。
 
 ### 看每日盈亏（谁在亏）
 ```bash
-python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" logs pnl-summary --agent <id>
+python3 "$S" logs pnl-summary --agent <id>
 ```
 
 ### 看逐单盈亏（哪笔爆仓）
 ```bash
-python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" logs pnl-orders --agent <id>
+python3 "$S" logs pnl-orders --agent <id>
 ```
 
 ### 看当前持仓（有没有堆仓）
 ```bash
-python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" logs positions --agent <id>
+python3 "$S" logs positions --agent <id>
 ```
 健康 PM 持仓 1-3 个；≥6 个脚本会告警（说明 prompt 的克制被忽略）。
 
@@ -193,10 +208,11 @@ python3 "$CLAUDE_SKILL_DIR/scripts/flowmax.py" logs positions --agent <id>
 ## 脚本速查（`scripts/flowmax.py`，stdlib only，`python3` 直跑）
 
 ```bash
-export FLOWMAX_JWT="<你的 JWT>"          # 必须，只在自己 shell 里设
-export FLOWMAX_BASE="https://market.prod.gcp.hubble-rpc.xyz"  # 可选，默认 staging
+export FLOWMAX_JWT="<你的 JWT>"          # 必须，只在自己 shell 里设（不要带 Bearer）
+# 默认连 PROD；要切 staging 才设下面这条：
+# export FLOWMAX_BASE="https://market.dev.gcp.hubble-rpc.xyz"
 
-S="$CLAUDE_SKILL_DIR/scripts/flowmax.py"
+S="${CLAUDE_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/flowmax-skill}/scripts/flowmax.py"
 python3 $S probe                                 # 探测合法值 + mock id + 内嵌模板
 python3 $S research create --name .. --prompt .. # 建 research（单个 flags 或 --spec 批量）
 python3 $S research get    --agent <id>          # 详情（看 reconcile 挑了哪些数据源）

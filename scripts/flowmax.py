@@ -37,7 +37,7 @@ import urllib.request
 from pathlib import Path
 
 API_PREFIX = "/api/v1"
-DEFAULT_BASE = "https://market.dev.gcp.hubble-rpc.xyz"  # staging (host is "dev", not "staging")
+DEFAULT_BASE = "https://market.prod.gcp.hubble-rpc.xyz"  # PROD by default; set FLOWMAX_BASE for staging
 PROD_BASE = "https://market.prod.gcp.hubble-rpc.xyz"
 
 
@@ -152,6 +152,16 @@ STYLE_LABELS = {
 # =========================================================================
 def base_url() -> str:
     return os.environ.get("FLOWMAX_BASE") or os.environ.get("HUBBLE_BASE") or DEFAULT_BASE
+
+
+def env_tag() -> str:
+    """Tag the resolved environment so it's loud on every run (prod is the default)."""
+    h = base_url()
+    if "prod" in h:
+        return "PROD"
+    if "dev" in h or "staging" in h:
+        return "STAGING"
+    return "UNKNOWN"
 
 
 def env_short(name: str) -> str:
@@ -328,6 +338,7 @@ def cmd_research_create(args):
         item.setdefault("llm_model", model)
         item.setdefault("asset_type", "Crypto")
         item.setdefault("language", "zh-CN")
+        item.setdefault("is_public", False)  # default private — never leak to marketplace
         # NEVER send datasource_ids — Creator reconciles from prompt automatically.
         item.pop("datasource_ids", None)
         name = item.get("name", f"research-{i}")
@@ -439,7 +450,7 @@ def cmd_pm_create(args):
         "risk_config": risk,
         "llm_provider_id": spec.get("llm_provider_id", pid),
         "llm_model": spec.get("llm_model", model),
-        "is_public": spec.get("is_public", True),
+        "is_public": spec.get("is_public", False),  # default private — never leak to marketplace
         "auto_start_scheduler": spec.get("auto_start_scheduler", True),
     }
     if spec.get("research_agent_ids"):
@@ -461,6 +472,17 @@ def cmd_pm_create(args):
             print("hint: verify it actually runs with `pm status --agent <id>` (look for isSchedulerRunning + intervalMs)")
         return 0
     sys.stderr.write(f"ERROR: create PM failed HTTP {c}: {d}\n")
+    # Best-effort rollback: the paper-trading credential created above is now orphaned.
+    # Don't mask the original error; if the delete also fails, tell the user how to clean up.
+    if mock_auth_id:
+        rc, _ = api("DELETE", f"/user-exchange-auths/{mock_auth_id}", quiet=True)
+        if rc in (200, 204):
+            sys.stderr.write(f"  rollback: deleted orphan mock auth {mock_auth_id} (HTTP {rc})\n")
+        else:
+            sys.stderr.write(
+                f"  rollback FAILED (HTTP {rc}): orphan mock auth {mock_auth_id} left behind — "
+                f"clean manually via DELETE /user-exchange-auths/{mock_auth_id}\n"
+            )
     return 1
 
 
@@ -717,7 +739,12 @@ def build_parser():
     rcc.add_argument("--asset-type", default="Crypto", dest="asset_type")
     rcc.add_argument("--analysis-type", default="Quantitative Analysis", dest="analysis_type")
     rcc.add_argument("--language", default="zh-CN")
-    rcc.add_argument("--public", default=True, action="store_true")
+    rcc_vis = rcc.add_mutually_exclusive_group()
+    rcc_vis.add_argument("--public", dest="public", action="store_true",
+                         help="公开进 marketplace")
+    rcc_vis.add_argument("--private", dest="public", action="store_false",
+                         help="私有（默认）")
+    rcc.set_defaults(public=False)
     rcc.add_argument("--out", default=None)
     rcc.add_argument("--interval", type=float, default=4.0, help="每个创建间隔秒")
     rcc.add_argument("--wait", type=int, default=0, help="部署等待秒 (0=建完即返回)")
@@ -750,7 +777,12 @@ def build_parser():
     pmc.add_argument("--overlay", default=None, choices=list(OVERLAYS),
                      help="追加固件：hard-stop(推荐,真实交易) / multi-trade(会堆仓,慎用)")
     pmc.add_argument("--extra-prompt", default=None, dest="extra_prompt", help="追加任意 prompt 文本")
-    pmc.add_argument("--public", default=True, action="store_true")
+    pmc_vis = pmc.add_mutually_exclusive_group()
+    pmc_vis.add_argument("--public", dest="public", action="store_true",
+                         help="公开进 marketplace")
+    pmc_vis.add_argument("--private", dest="public", action="store_false",
+                         help="私有（默认）")
+    pmc.set_defaults(public=False)
     pmc.add_argument("--no-auto-start", dest="auto_start", action="store_false", default=True,
                      help="建完不自动启 scheduler（批量/错峰时用）")
     pmc.add_argument("--out", default=None)
@@ -814,6 +846,12 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    # Loud env banner on every run — prod is the default, so make sure the user
+    # always sees which environment they're hitting before any real action.
+    sys.stderr.write(
+        f"[flowmax] env={env_tag()}  BASE={base_url()}  "
+        f"JWT={env_short('FLOWMAX_JWT') or env_short('HUBBLE_JWT') or env_short('JWT')}\n"
+    )
     return args.func(args)
 
 
